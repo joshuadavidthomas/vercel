@@ -1,10 +1,11 @@
-import { Agent } from 'https';
+import http from 'http';
+import https from 'https';
 import { Readable } from 'stream';
-import { EventEmitter } from 'events';
+import { EventEmitter } from 'node:events';
 import retry from 'async-retry';
 import { Sema } from 'async-sema';
 
-import { DeploymentFile } from './utils/hashes';
+import { DeploymentFile, FilesMap } from './utils/hashes';
 import { fetch, API_FILES, createDebug } from './utils';
 import { DeploymentError } from './errors';
 import { deploy } from './deploy';
@@ -28,7 +29,7 @@ const isClientNetworkError = (err: Error) => {
 };
 
 export async function* upload(
-  files: Map<string, DeploymentFile>,
+  files: FilesMap,
   clientOptions: VercelClientOptions,
   deploymentOptions: DeploymentOptions
 ): AsyncIterableIterator<any> {
@@ -78,7 +79,11 @@ export async function* upload(
   debug('Building an upload list...');
 
   const semaphore = new Sema(50, { capacity: 50 });
-  const agent = new Agent({ keepAlive: true });
+  const defaultAgent = apiUrl?.startsWith('https://')
+    ? new https.Agent({ keepAlive: true })
+    : new http.Agent({ keepAlive: true });
+  const abortControllers = new Set<AbortController>();
+  let aborted = false;
 
   shas.forEach((sha, index) => {
     const uploadProgress = uploads[index];
@@ -94,7 +99,15 @@ export async function* upload(
 
         await semaphore.acquire();
 
+        if (aborted) {
+          return bail(new Error('Upload aborted'));
+        }
+
         const { data } = file;
+        if (typeof data === 'undefined') {
+          // Directories don't need to be uploaded
+          return;
+        }
 
         uploadProgress.bytesUploaded = 0;
 
@@ -119,13 +132,15 @@ export async function* upload(
 
         let err;
         let result;
+        const abortController = new AbortController();
+        abortControllers.add(abortController);
 
         try {
           const res = await fetch(
             API_FILES,
             token,
             {
-              agent,
+              agent: clientOptions.agent || defaultAgent,
               method: 'POST',
               headers: {
                 'Content-Type': 'application/octet-stream',
@@ -137,9 +152,10 @@ export async function* upload(
               teamId,
               apiUrl,
               userAgent,
+              // @ts-expect-error: typescript is getting confused with the signal types from node (web & server) and node-fetch (server only)
+              signal: abortController.signal,
             },
-            clientOptions.debug,
-            true
+            clientOptions.debug
           );
 
           if (res.status === 200) {
@@ -182,10 +198,15 @@ export async function* upload(
           } else {
             debug('Other error, bailing: ' + err.message);
             // Otherwise we bail
+            if (!aborted) {
+              aborted = true;
+              abortControllers.forEach(controller => controller.abort());
+            }
             return bail(err);
           }
         }
 
+        abortControllers.delete(abortController);
         return result;
       },
       {
@@ -200,9 +221,7 @@ export async function* upload(
 
   while (Object.keys(uploadList).length > 0) {
     try {
-      const event = await Promise.race(
-        Object.keys(uploadList).map((key): Promise<any> => uploadList[key])
-      );
+      const event = await Promise.race(Object.values(uploadList));
 
       delete uploadList[event.payload.sha];
       yield event;

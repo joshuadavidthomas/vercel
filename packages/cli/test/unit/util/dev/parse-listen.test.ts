@@ -1,4 +1,9 @@
-import parseListen from '../../../../src/util/dev/parse-listen';
+import assert from 'assert';
+import { describe, expect, it, test } from 'vitest';
+import {
+  parseListen,
+  replaceLocalhost,
+} from '../../../../src/util/dev/parse-listen';
 
 const IS_WINDOWS = process.platform === 'win32';
 
@@ -38,6 +43,7 @@ describe('parseListen', () => {
 
   it('should parse "unix:/home/user/server.sock" as UNIX socket file', () => {
     if (IS_WINDOWS) {
+      // eslint-disable-next-line no-console
       console.log('Skipping this test on Windows.');
       return;
     }
@@ -49,6 +55,7 @@ describe('parseListen', () => {
 
   it('should parse "pipe:\\\\.\\pipe\\PipeName" as UNIX pipe', () => {
     if (IS_WINDOWS) {
+      // eslint-disable-next-line no-console
       console.log('Skipping this test on Windows.');
       return;
     }
@@ -64,8 +71,21 @@ describe('parseListen', () => {
       parseListen('bad://url');
       throw new Error('Should not happen');
     } catch (_err) {
+      assert(_err instanceof Error);
       err = _err;
     }
     expect(err.message).toEqual('Unknown `--listen` scheme (protocol): bad:');
+  });
+});
+
+describe('replaceLocalhost', () => {
+  test.each([
+    { input: 'http://192.168.0.1:1234', output: 'http://192.168.0.1:1234' },
+    { input: 'http://127.0.0.1:4000', output: 'http://127.0.0.1:4000' },
+    { input: 'http://[::1]:3001', output: 'http://[::1]:3001' },
+    { input: 'http://0.0.0.0:3000', output: 'http://localhost:3000' },
+    { input: 'http://[::]:3002', output: 'http://localhost:3002' },
+  ])('"$input" → "$output"', ({ input, output }) => {
+    expect(replaceLocalhost(input)).toEqual(output);
   });
 });
